@@ -96,6 +96,13 @@ _refresh_in_progress = threading.Event()
 # API-HJELPERE
 # ============================================
 
+def invalidate_token():
+    """Tving ny token-henting ved neste kall."""
+    with _cache_lock:
+        _cache["token_expires"] = None
+    log.info("Token invalidert — henter ny ved neste forsøk")
+
+
 def get_access_token():
     """Hent access token fra VenueOps (med caching).
 
@@ -358,12 +365,23 @@ def get_day_data(date, token):
     sanity_events = get_sanity_events(date)
     log.info("Sanity events funnet for %s: %d", date_str, len(sanity_events))
 
-    # Hent alle funksjoner for dagen
+    # Hent alle funksjoner for dagen (med retry ved 401)
     response = requests.get(
         f"https://api.eu-venueops.com/v1/functions?startDate={date_str}&endDate={date_str}",
         headers=headers,
         timeout=15,
     )
+    if response.status_code == 401:
+        log.warning("VenueOps 401 — token utløpt, henter ny og prøver igjen")
+        invalidate_token()
+        new_token = get_access_token()
+        if new_token:
+            headers = {"Authorization": f"Bearer {new_token}"}
+            response = requests.get(
+                f"https://api.eu-venueops.com/v1/functions?startDate={date_str}&endDate={date_str}",
+                headers=headers,
+                timeout=15,
+            )
     response.raise_for_status()
     functions = response.json()
 
