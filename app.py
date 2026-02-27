@@ -505,8 +505,12 @@ def update_cache():
 def background_updater():
     """Bakgrunnstråd som oppdaterer cache hvert 10. minutt"""
     while True:
-        time.sleep(UPDATE_INTERVAL)
-        update_cache()
+        try:
+            time.sleep(UPDATE_INTERVAL)
+            update_cache()
+        except Exception as e:
+            print(f"  Bakgrunnstråd feil: {e}")
+            time.sleep(60)  # Vent 1 min ved feil, prøv igjen
 
 def get_cached_data(day):
     """Hent data fra cache - oppdater status on-the-fly for i dag"""
@@ -601,20 +605,34 @@ def debug_sanity():
     except Exception as e:
         return jsonify({'error': str(e)})
 
-if __name__ == '__main__':
-    # Start bakgrunns-oppdatering
+# ============================================
+# OPPSTART — kjøres både av Gunicorn og python app.py
+# ============================================
+_updater_started = False
+
+def start_background_updater():
+    """Start bakgrunnstråd (kjøres kun én gang)"""
+    global _updater_started
+    if _updater_started:
+        return
+    _updater_started = True
+
     print("=" * 50)
     print("Litteraturhuset Dagsoversikt")
     print(f"Auto-oppdatering: hvert {UPDATE_INTERVAL // 60} minutt")
     print("Manuell refresh: POST /api/refresh")
     print("=" * 50)
-    
-    # Første oppdatering - synkront for å ha data klar
+
+    # Første oppdatering
     update_cache()
-    
+
     # Start bakgrunnstråd
     updater_thread = threading.Thread(target=background_updater, daemon=True)
     updater_thread.start()
-    
-    # Start Flask
+
+# Start ved import (fungerer med både Gunicorn og Flask dev server)
+start_background_updater()
+
+if __name__ == '__main__':
+    # Kun for lokal utvikling
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
