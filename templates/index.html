@@ -1321,7 +1321,7 @@
             
             container.innerHTML = verter.map((vert, index) => {
                 if (vert.skolebesok) {
-                    const label = vert.name.replace(/^skolebesøk:?\s*/i, '');
+                    const label = vert.name.replace(/^skolebesøk(svert)?\s*:?\s*/i, '').trim() || vert.name;
                     return `
                 <div class="vert-card skolebesok ${vert.active ? 'active' : ''}">
                     <span class="vert-name"><span class="skole-tag">Skole</span>${label}</span>
