@@ -772,6 +772,74 @@ def get_data(day):
     return jsonify(data)
 
 
+def _consolidate_skolebesok(items, is_today):
+    """Slå sammen skolebesøk-funksjoner (samme eventName+roomId) til én representerende rad.
+
+    Momentus registrerer ofte ett skolebesøk som flere Arrangement-funksjoner (én per
+    klasse-sesjon). Infoskjermen skal vise ÉN rad som reflekterer gjeldende fase —
+    rigg, get-in, pågående eller neste sesjon — ikke en liste over alle sub-sesjoner.
+
+    Prioritet: pågående > neste kommende > sist ferdige.
+    """
+    from collections import defaultdict
+
+    grouped = defaultdict(list)
+    others = []
+    for item in items:
+        name = (item.get("arrangement", {}).get("eventName") or "").strip().lower()
+        if name.startswith("skolebes"):
+            key = (name, item["arrangement"].get("roomId"))
+            grouped[key].append(item)
+        else:
+            others.append(item)
+
+    if not grouped:
+        return items
+
+    now = _norsk_naa() if is_today else None
+    now_str = now.strftime("%H:%M") if now else None
+
+    def _in_range(start, end):
+        return start and end and now_str and start <= now_str < end
+
+    consolidated = []
+    for group in grouped.values():
+        if len(group) == 1:
+            consolidated.append(group[0])
+            continue
+
+        chosen = None
+        if is_today and now_str:
+            # 1) pågående arrangement
+            chosen = next((i for i in group if _in_range(i["arrangement"].get("startTime"), i["arrangement"].get("endTime"))), None)
+            # 2) pågående get-in
+            if not chosen:
+                chosen = next((i for i in group if i.get("getin_info") and _in_range(i["getin_info"]["start"], i["getin_info"]["end"])), None)
+            # 3) pågående rigg
+            if not chosen:
+                chosen = next((i for i in group if i.get("rigg_info") and _in_range(i["rigg_info"]["start"], i["rigg_info"]["end"])), None)
+            # 4) neste kommende (rigg/getin/arr i fremtiden)
+            if not chosen:
+                upcoming = [i for i in group if i["arrangement"].get("endTime", "") > now_str]
+                if upcoming:
+                    upcoming.sort(key=lambda i: i["arrangement"].get("startTime", ""))
+                    chosen = upcoming[0]
+            # 5) fallback: sist ferdige
+            if not chosen:
+                finished = sorted(group, key=lambda i: i["arrangement"].get("endTime", ""))
+                chosen = finished[-1]
+        else:
+            # "I morgen" eller ukjent tid — vis første sesjon
+            chosen = sorted(group, key=lambda i: i["arrangement"].get("startTime", ""))[0]
+
+        # Annoter med antall sesjoner så frontend kan vise "sesjon 2/3" hvis ønsket
+        chosen = copy.deepcopy(chosen)
+        chosen["skolebesok_sessions"] = len(group)
+        consolidated.append(chosen)
+
+    return others + consolidated
+
+
 def get_cached_data(day):
     """Hent data fra cache — oppdater status on-the-fly for i dag."""
     with _cache_lock:
@@ -786,9 +854,16 @@ def get_cached_data(day):
                     tid_parts = v["tid"].split("-")
                     if len(tid_parts) == 2:
                         v["active"] = is_active(tid_parts[0], tid_parts[1])
+                data["arrangementer"] = _consolidate_skolebesok(data["arrangementer"], is_today=True)
+                data["arrangementer"].sort(key=lambda x: x.get("sort_time", ""))
             return data
         else:
-            return _cache.get("tomorrow")
+            data = _cache.get("tomorrow")
+            if data:
+                data = copy.deepcopy(data)
+                data["arrangementer"] = _consolidate_skolebesok(data["arrangementer"], is_today=False)
+                data["arrangementer"].sort(key=lambda x: x.get("sort_time", ""))
+            return data
 
 
 @app.route("/api/status")
