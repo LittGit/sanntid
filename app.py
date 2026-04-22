@@ -393,7 +393,8 @@ def get_day_data(date, token):
         and "sjeherasad" not in (f.get("roomName") or "").lower()
     ]
     rigg = [f for f in functions if f.get("functionTypeName") == "Rigg" and f.get("functionStatus") != "canceled"]
-    getin = [f for f in functions if f.get("functionTypeName") == "Get-in" and f.get("functionStatus") != "canceled"]
+    # Get-in inkluderer "Dørene åpner" — samme rolle i status-logikken
+    getin = [f for f in functions if f.get("functionTypeName") in ("Get-in", "Dørene åpner") and f.get("functionStatus") != "canceled"]
     getout = [f for f in functions if f.get("functionTypeName") == "Get-out" and f.get("functionStatus") != "canceled"]
     verter = sorted(
         [f for f in functions if f.get("functionTypeName") == "Vert"],
@@ -470,36 +471,65 @@ def get_day_data(date, token):
     for arr in arrangementer:
         event_name = arr.get("eventName")
         room_id = arr.get("roomId")
+        arr_start = arr.get("startTime", "")
+        arr_end = arr.get("endTime", "")
 
-        # Finn tilhørende rigg — lagre ALLE riggetider
-        rigg_funcs = [r for r in rigg if r.get("eventName") == event_name and r.get("roomId") == room_id]
+        # Nærmeste-funksjon-logikk: unngå at morgens rigg tilskrives kveldsarr,
+        # eller at tidlig get-out knyttes til sent arr når samme event har flere slots.
+        def _has_intermediate_arr(after_time, before_time):
+            return any(
+                a for a in arrangementer
+                if a.get("eventName") == event_name and a.get("roomId") == room_id
+                and a.get("startTime", "") > after_time
+                and a.get("startTime", "") < before_time
+            )
+
+        # Rigg — alle som slutter ≤ arr.start og ikke har mellomliggende arr
+        rigg_funcs = [
+            r for r in rigg
+            if r.get("eventName") == event_name and r.get("roomId") == room_id
+            and r.get("endTime", "") <= arr_start
+            and not _has_intermediate_arr(r.get("endTime", ""), arr_start)
+        ]
         rigg_info = None
         rigg_tider = []
         if rigg_funcs:
             rigg_funcs_sorted = sorted(rigg_funcs, key=lambda x: x["startTime"])
-            for rf in rigg_funcs_sorted:
-                rigg_tider.append(f"{rf['startTime']}-{rf['endTime']}")
-
-            starts = [r["startTime"] for r in rigg_funcs]
-            ends = [r["endTime"] for r in rigg_funcs]
+            rigg_tider = [f"{rf['startTime']}-{rf['endTime']}" for rf in rigg_funcs_sorted]
             rigg_info = {
-                "start": min(starts),
-                "end": max(ends),
+                "start": rigg_funcs_sorted[0]["startTime"],
+                "end": rigg_funcs_sorted[-1]["endTime"],
                 "count": len(rigg_funcs),
                 "tider": rigg_tider,
             }
 
-        # Finn tilhørende get-in
-        getin_funcs = [g for g in getin if g.get("eventName") == event_name and g.get("roomId") == room_id]
+        # Get-in / Dørene åpner — samme nærmeste-logikk
+        getin_funcs = [
+            g for g in getin
+            if g.get("eventName") == event_name and g.get("roomId") == room_id
+            and g.get("endTime", "") <= arr_start
+            and not _has_intermediate_arr(g.get("endTime", ""), arr_start)
+        ]
         getin_info = None
         if getin_funcs:
             getin_info = {
                 "start": min(g["startTime"] for g in getin_funcs),
                 "end": max(g["endTime"] for g in getin_funcs),
+                "type": getin_funcs[0].get("functionTypeName", "Get-in"),
             }
 
-        # Finn tilhørende get-out
-        getout_funcs = [g for g in getout if g.get("eventName") == event_name and g.get("roomId") == room_id]
+        # Get-out — starter ≥ arr.end, uten at et annet arr slutter imellom
+        getout_funcs = [
+            g for g in getout
+            if g.get("eventName") == event_name and g.get("roomId") == room_id
+            and g.get("startTime", "") >= arr_end
+            and not any(
+                a for a in arrangementer
+                if a.get("eventName") == event_name and a.get("roomId") == room_id
+                and a.get("endTime", "") > arr_end
+                and a.get("endTime", "") < g.get("startTime", "")
+            )
+        ]
         getout_info = None
         if getout_funcs:
             getout_info = {
@@ -563,6 +593,8 @@ def get_day_data(date, token):
             "event_id": event_id,
             "rigg_tider": rigg_tider if rigg_tider else None,
             "rigg_tid": f"{rigg_info['start']}-{rigg_info['end']}" if rigg_info else None,
+            "getin_tid": f"{getin_info['start']}-{getin_info['end']}" if getin_info else None,
+            "getout_tid": f"{getout_info['start']}-{getout_info['end']}" if getout_info else None,
             "arr_tid": f"{arr['startTime']}-{arr['endTime']}",
             "rigg_count": rigg_info["count"] if rigg_info else 0,
             "sanity": sanity_info,
@@ -573,14 +605,18 @@ def get_day_data(date, token):
     # Sorter etter riggetid/arrangement-tid
     result.sort(key=lambda x: x["sort_time"])
 
-    # Prosesser verter
+    # Prosesser verter — Skolebesøk beholder full streng (inkl. klasse/skole etter kolon)
     verter_processed = []
     for v in verter:
-        name = v.get("name", "").strip()
-        if name:
+        name = (v.get("name") or "").strip()
+        is_skolebesok = name.lower().startswith("skolebesøk")
+        if is_skolebesok:
+            display_name = name
+            first_name = "skolebesøk"
+        elif name:
             parts = name.split()
-            display_name = " ".join(parts[:4]) if parts else "(ukjent)"
-            first_name = parts[0] if parts else "ukjent"
+            display_name = " ".join(parts[:4])
+            first_name = parts[0]
         else:
             display_name = "(ukjent)"
             first_name = "ukjent"
@@ -591,6 +627,7 @@ def get_day_data(date, token):
             "bilde": f"/static/teknikere/{first_name.lower()}.jpg",
             "tid": f"{v.get('startTime', '?')}-{v.get('endTime', '?')}",
             "active": is_today and is_active(v.get("startTime"), v.get("endTime")),
+            "skolebesok": is_skolebesok,
         })
 
     data = {
@@ -735,6 +772,74 @@ def get_data(day):
     return jsonify(data)
 
 
+def _consolidate_skolebesok(items, is_today):
+    """Slå sammen skolebesøk-funksjoner (samme eventName+roomId) til én representerende rad.
+
+    Momentus registrerer ofte ett skolebesøk som flere Arrangement-funksjoner (én per
+    klasse-sesjon). Infoskjermen skal vise ÉN rad som reflekterer gjeldende fase —
+    rigg, get-in, pågående eller neste sesjon — ikke en liste over alle sub-sesjoner.
+
+    Prioritet: pågående > neste kommende > sist ferdige.
+    """
+    from collections import defaultdict
+
+    grouped = defaultdict(list)
+    others = []
+    for item in items:
+        name = (item.get("arrangement", {}).get("eventName") or "").strip().lower()
+        if name.startswith("skolebes"):
+            key = (name, item["arrangement"].get("roomId"))
+            grouped[key].append(item)
+        else:
+            others.append(item)
+
+    if not grouped:
+        return items
+
+    now = _norsk_naa() if is_today else None
+    now_str = now.strftime("%H:%M") if now else None
+
+    def _in_range(start, end):
+        return start and end and now_str and start <= now_str < end
+
+    consolidated = []
+    for group in grouped.values():
+        if len(group) == 1:
+            consolidated.append(group[0])
+            continue
+
+        chosen = None
+        if is_today and now_str:
+            # 1) pågående arrangement
+            chosen = next((i for i in group if _in_range(i["arrangement"].get("startTime"), i["arrangement"].get("endTime"))), None)
+            # 2) pågående get-in
+            if not chosen:
+                chosen = next((i for i in group if i.get("getin_info") and _in_range(i["getin_info"]["start"], i["getin_info"]["end"])), None)
+            # 3) pågående rigg
+            if not chosen:
+                chosen = next((i for i in group if i.get("rigg_info") and _in_range(i["rigg_info"]["start"], i["rigg_info"]["end"])), None)
+            # 4) neste kommende (rigg/getin/arr i fremtiden)
+            if not chosen:
+                upcoming = [i for i in group if i["arrangement"].get("endTime", "") > now_str]
+                if upcoming:
+                    upcoming.sort(key=lambda i: i["arrangement"].get("startTime", ""))
+                    chosen = upcoming[0]
+            # 5) fallback: sist ferdige
+            if not chosen:
+                finished = sorted(group, key=lambda i: i["arrangement"].get("endTime", ""))
+                chosen = finished[-1]
+        else:
+            # "I morgen" eller ukjent tid — vis første sesjon
+            chosen = sorted(group, key=lambda i: i["arrangement"].get("startTime", ""))[0]
+
+        # Annoter med antall sesjoner så frontend kan vise "sesjon 2/3" hvis ønsket
+        chosen = copy.deepcopy(chosen)
+        chosen["skolebesok_sessions"] = len(group)
+        consolidated.append(chosen)
+
+    return others + consolidated
+
+
 def get_cached_data(day):
     """Hent data fra cache — oppdater status on-the-fly for i dag."""
     with _cache_lock:
@@ -749,9 +854,16 @@ def get_cached_data(day):
                     tid_parts = v["tid"].split("-")
                     if len(tid_parts) == 2:
                         v["active"] = is_active(tid_parts[0], tid_parts[1])
+                data["arrangementer"] = _consolidate_skolebesok(data["arrangementer"], is_today=True)
+                data["arrangementer"].sort(key=lambda x: x.get("sort_time", ""))
             return data
         else:
-            return _cache.get("tomorrow")
+            data = _cache.get("tomorrow")
+            if data:
+                data = copy.deepcopy(data)
+                data["arrangementer"] = _consolidate_skolebesok(data["arrangementer"], is_today=False)
+                data["arrangementer"].sort(key=lambda x: x.get("sort_time", ""))
+            return data
 
 
 @app.route("/api/status")

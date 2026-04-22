@@ -253,7 +253,24 @@
             font-size: 0.875rem;
             transition: background 0.2s ease;
             align-items: center;
+            position: relative;
         }
+
+        /* Tidsprogress — tynn linje nederst på pågående faser */
+        .event-row .row-progress {
+            position: absolute;
+            left: 0;
+            bottom: 0;
+            height: 2px;
+            width: var(--progress, 0%);
+            opacity: 0.55;
+            transition: width 2s linear;
+            pointer-events: none;
+        }
+        .event-row.status-active .row-progress { background: var(--status-active); }
+        .event-row.status-rigg .row-progress { background: var(--status-rigg); }
+        .event-row.status-getin .row-progress { background: var(--status-getin); }
+        .event-row.status-getout .row-progress { background: var(--accent); }
         
         .event-row.has-drawer-open {
             background: var(--bg-tertiary);
@@ -710,7 +727,36 @@
             color: var(--status-active);
             opacity: 0.7;
         }
-        
+
+        /* Skolebesøk — egen stil, strekker seg over hele rekken og viser fullt klassenavn */
+        .vert-card.skolebesok {
+            grid-column: 1 / -1;
+            background: var(--bg-tertiary);
+        }
+        .vert-card.skolebesok .vert-name {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.8rem;
+            color: var(--text-primary);
+            line-height: 1.35;
+            cursor: default;
+            white-space: normal;
+            flex: 1;
+        }
+        .skole-tag {
+            display: inline-block;
+            font-size: 0.62rem;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            background: var(--accent-dim);
+            color: var(--accent);
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+
         /* Legend */
         .legend {
             margin-top: 2rem;
@@ -983,53 +1029,79 @@
     <script>
         let currentDay = 'today';
         let refreshInterval;
-        
+        let lastDataSig = '';
+
         // Day toggle
         document.querySelectorAll('.day-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 document.querySelectorAll('.day-btn').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 currentDay = btn.dataset.day;
+                lastDataSig = ''; // tving re-render ved dagbytte
                 loadData();
             });
         });
-        
+
+        // Progress-bar-beregning — viser hvor langt i pågående fase vi er
+        function _timeToMin(t) {
+            const [h, m] = (t || '0:0').split(':').map(Number);
+            return h * 60 + m;
+        }
+        function computeProgress(startEnd) {
+            if (!startEnd) return 0;
+            const [start, end] = startEnd.split('-');
+            if (!start || !end) return 0;
+            const now = new Date();
+            const nMin = now.getHours() * 60 + now.getMinutes();
+            const sMin = _timeToMin(start), eMin = _timeToMin(end);
+            if (nMin < sMin || eMin <= sMin) return 0;
+            if (nMin >= eMin) return 100;
+            return Math.round(((nMin - sMin) / (eMin - sMin)) * 100);
+        }
+        function updateProgressBars() {
+            document.querySelectorAll('.event-row[data-progress-tid]').forEach(row => {
+                const pct = computeProgress(row.dataset.progressTid);
+                row.style.setProperty('--progress', pct + '%');
+            });
+        }
+
         async function loadData() {
             try {
                 const response = await fetch(`/api/data/${currentDay}`);
                 const data = await response.json();
-                
-                // Debug: sjekk sanity data
-                const withSanity = data.arrangementer.filter(e => e.sanity && e.sanity.url);
-                console.log(`Arrangementer: ${data.arrangementer.length}, med Sanity-match: ${withSanity.length}`);
-                
-                // Debug: sjekk tekniker data
-                data.arrangementer.forEach((e, i) => {
-                    if (e.teknikere) {
-                        console.log(`Event ${i} teknikere:`, e.teknikere);
-                    }
-                });
-                
-                // Update header
+
+                // Header oppdateres alltid (billig)
                 document.getElementById('weekday').textContent = data.weekday;
                 document.getElementById('date-text').textContent = data.date_display;
-                
-                // Separer aktive/kommende fra ferdige
+
+                // Signatur av data som påvirker DOM — hopp over rebuild hvis uendret
+                const sig = JSON.stringify({
+                    d: data.date,
+                    a: (data.arrangementer || []).map(e => [
+                        e.event_id, e.status, e.arr_tid, e.rigg_tid, e.getin_tid, e.getout_tid,
+                        e.room, e.arrangor,
+                        (e.teknikere || []).map(t => t.fornavn).join(',')
+                    ]),
+                    v: (data.verter || []).map(v => [v.name, v.tid, v.active])
+                });
+
+                if (sig === lastDataSig) {
+                    updateProgressBars(); // live-tick selv om data er uendret
+                    return;
+                }
+                lastDataSig = sig;
+
                 const activeEvents = data.arrangementer.filter(e => e.status !== 'finished');
                 const finishedEvents = data.arrangementer.filter(e => e.status === 'finished');
-                
-                // Render aktive events
+
                 renderEvents(activeEvents);
-                
-                // Render ferdige events
                 renderFinishedEvents(finishedEvents);
-                
-                // Render verter
                 renderVerter(data.verter);
-                
+                updateProgressBars();
+
             } catch (error) {
                 console.error('Error loading data:', error);
-                document.getElementById('events-container').innerHTML = 
+                document.getElementById('events-container').innerHTML =
                     '<div class="empty-state">Kunne ikke hente data. Prøv igjen senere.</div>';
             }
         }
@@ -1131,8 +1203,16 @@
                     `;
                 }
                 
+                // Tids-progressbar for pågående faser — JS/tick beregner prosent
+                const progressTid = event.status === 'active' ? event.arr_tid
+                    : event.status === 'rigg' && event.rigg_tid ? event.rigg_tid
+                    : event.status === 'getin' && event.getin_tid ? event.getin_tid
+                    : event.status === 'getout' && event.getout_tid ? event.getout_tid
+                    : '';
+                const progressAttr = progressTid ? ` data-progress-tid="${progressTid}"` : '';
+
                 return `
-                    <div class="event-row status-${event.status}">
+                    <div class="event-row status-${event.status}"${progressAttr}>
                         <div class="rigg-tid">
                             <span class="mobile-label">Rigg:</span>
                             ${riggTidHtml}
@@ -1158,6 +1238,7 @@
                             <span class="mobile-label">Tid:</span>
                             ${event.arr_tid}
                         </div>
+                        ${progressTid ? '<div class="row-progress"></div>' : ''}
                         ${teknikerDrawerHtml}
                         ${drawerHtml}
                     </div>
@@ -1165,21 +1246,12 @@
             }).join('');
             
             // Legg til click handlers for tekniker-navn
-            const teknikerNavnElements = document.querySelectorAll('.tekniker-navn');
-            console.log('Tekniker-navn elementer funnet:', teknikerNavnElements.length);
-            
-            teknikerNavnElements.forEach(el => {
+            document.querySelectorAll('.tekniker-navn').forEach(el => {
                 el.addEventListener('click', function(e) {
                     e.stopPropagation();
                     const teknikerId = this.dataset.tekniker;
-                    console.log('Klikket på tekniker:', teknikerId);
                     const drawer = document.getElementById(`tekniker-drawer-${teknikerId}`);
-                    console.log('Drawer funnet:', drawer);
-                    
-                    if (!drawer) {
-                        console.error('Tekniker-drawer ikke funnet:', `tekniker-drawer-${teknikerId}`);
-                        return;
-                    }
+                    if (!drawer) return;
                     
                     // Toggle drawer
                     const isOpen = drawer.classList.contains('open');
@@ -1203,12 +1275,9 @@
                     const drawerId = this.dataset.drawer;
                     const drawer = document.getElementById(drawerId);
                     const parentRow = this.closest('.event-row');
-                    
-                    if (!drawer) {
-                        console.error('Drawer not found:', drawerId);
-                        return;
-                    }
-                    
+                    if (!drawer) return;
+
+
                     // Toggle denne draweren
                     const isOpen = drawer.classList.contains('open');
                     
@@ -1227,7 +1296,6 @@
                 });
             });
             
-            console.log('Drawer handlers attached:', document.querySelectorAll('.arrangor-title.has-sanity').length);
         }
         
         // Lukk drawer når man klikker utenfor
@@ -1251,7 +1319,16 @@
                 return;
             }
             
-            container.innerHTML = verter.map((vert, index) => `
+            container.innerHTML = verter.map((vert, index) => {
+                if (vert.skolebesok) {
+                    const label = vert.name.replace(/^skolebesøk(svert)?\s*:?\s*/i, '').trim() || vert.name;
+                    return `
+                <div class="vert-card skolebesok ${vert.active ? 'active' : ''}">
+                    <span class="vert-name"><span class="skole-tag">Skole</span>${label}</span>
+                    <span class="vert-tid">${vert.tid}</span>
+                </div>`;
+                }
+                return `
                 <div class="vert-card ${vert.active ? 'active' : ''}">
                     <span class="vert-name clickable" data-vert="${index}">${vert.name}</span>
                     <span class="vert-tid">${vert.tid}</span>
@@ -1263,8 +1340,8 @@
                             </div>
                         </div>
                     </div>
-                </div>
-            `).join('');
+                </div>`;
+            }).join('');
             
             // Legg til click handlers for vert-navn
             document.querySelectorAll('.vert-name.clickable').forEach(el => {
@@ -1400,9 +1477,12 @@
             }
         }
         
-        // Oppdater "sist oppdatert" hvert 30. sekund
+        // Oppdater "sist oppdatert" + progress-bar hvert 30. sekund (uten nytt API-kall)
         updateLastRefreshTime();
-        setInterval(updateLastRefreshTime, 30000);
+        setInterval(() => {
+            updateLastRefreshTime();
+            updateProgressBars();
+        }, 30000);
     </script>
 </body>
 </html>
